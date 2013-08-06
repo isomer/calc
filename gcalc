@@ -1,0 +1,137 @@
+#!/usr/bin/python
+import calc
+import gtk
+import gnome
+import gnome.ui
+import gtk.glade
+import gconf
+import gobject
+import sys
+
+def update_watch(model, path, iter):
+	a=model.get_value(iter,0)
+	if "=" in a:
+		a=a.split("=")[0]
+	assert type(a)==type("")
+	model.set(iter,1,calc.evaluate_str(a))
+	model.set(iter,0,calc.expression_str(a+"="+str(calc.symtab[str(a.strip())])))
+
+def update_watches():
+	global watches
+	watches.foreach(update_watch)
+
+# Press escape twice to quit
+quit_flag=0
+def on_entry_key_release_event(widget,key):
+	global quit_flag
+	if gtk.gdk.keyval_from_name("Escape") == key.keyval:
+		if quit_flag:
+			gtk.main_quit()
+		quit_flag=1
+		return True
+	else:
+		quit_flag=0
+
+def set_result(x):
+	xml.get_widget("result").set_markup("<big><b>"+x+"</b></big>")
+
+def on_go_clicked(widget):
+	try:
+		ret=calc.evaluate(xml.get_widget("entry").get_text())
+		if ret.__class__==calc.DefinedFunction:
+			set_result(str(ret))
+		else:
+			set_result(str(ret.getValue(calc.symtab)))
+			if ret.__class__==calc.Variable:
+				append_watch(ret)
+		xml.get_widget("entry").set_text(str(ret))
+	except Exception, e:
+		set_result("#\""+str(e)+"\"")
+	xml.get_widget("entry").select_region(0,-1)
+	update_watches()
+
+def on_quit1_activate(*args):
+	gtk.main_quit()
+
+on_calc_main_delete_event = on_quit1_activate
+
+def on_add1_activate(*args):
+	xml.get_widget("add_watch_dialog").show()
+
+
+# Load the UI
+xml = gtk.glade.XML("calc.glade")
+app = xml.get_widget("calc_main")
+xml.signal_autoconnect(globals())
+
+# Load saved data
+client = gconf.client_get_default ()
+client.add_dir ("/apps/perry-calc", gconf.CLIENT_PRELOAD_NONE)
+client.add_dir ("/apps/perry-calc/symbols", gconf.CLIENT_PRELOAD_NONE)
+for i in client.all_entries("/apps/perry-calc/symbols"):
+	try:
+		calc.evaluate(i.get_value().get_string())
+	except Exception,e:
+		print "Couldn't import expression:"
+		print e
+		print
+
+def find_watch(model, path, iter,exp):
+	exp2=model.get_value(iter,0)
+	if "=" in exp2:
+		exp2=exp2.split("=")[0]
+		
+	if str(exp2)==str(exp):
+		raise "Duplicate"
+
+def append_watch(exp):
+	try:
+		watches.foreach(find_watch,exp)
+		a=calc.expression_str(exp)
+		assert type(a)==type("")
+		iter=watches.append()
+		watches.set(iter,0,a,1,"#\"Unknown\"")
+		if hasattr(xml.get_widget("watch_expander"),"set_expanded"):
+			xml.get_widget("watch_expander").set_expanded(1)
+	except "Duplicate":
+		return
+
+# Init the calculator
+calc.init()
+
+# Build the watches UI
+watches=gtk.ListStore(gobject.TYPE_STRING,gobject.TYPE_STRING)
+
+xml.get_widget("watches").set_model(watches)
+
+expression_column=gtk.TreeViewColumn("Expression",
+	gtk.CellRendererText(),
+	text=0)
+expression_column.set_sizing(gtk.TREE_VIEW_COLUMN_AUTOSIZE)
+xml.get_widget("watches").append_column(expression_column)
+
+result_column=gtk.TreeViewColumn("Result",
+	gtk.CellRendererText(),
+	text=1)
+result_column.set_sizing(gtk.TREE_VIEW_COLUMN_AUTOSIZE)
+xml.get_widget("watches").append_column(result_column)
+
+update_watches()
+
+gtk.mainloop()
+
+# On quit
+for k,v in calc.symtab.items():
+	# Symbols beginning with _ aren't saved across sessions
+	if k[0]=="_":
+		continue
+	# Skip native functions
+	# We can't serialise these out unfortunately
+	if v.__class__ == calc.DefinedNativeFunction:
+		continue
+	# These can be serialised directly
+	if v.__class__ == calc.DefinedFunction:
+		client.set_string("/apps/perry-calc/symbols/%s"%v.func,str(v))
+		continue
+	# These can't.
+	client.set_string("/apps/perry-calc/symbols/%s"%k,"%s=%s" % (k,str(v)))
